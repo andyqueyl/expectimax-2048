@@ -1,0 +1,861 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Watch an expectimax search play 2048, see how it rates every move, and tune its heuristic weights.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23c3ccc7'/%3E%3Crect x='3' y='3' width='12' height='12' rx='2.5' fill='%23f3be86'/%3E%3Crect x='17' y='3' width='12' height='12' rx='2.5' fill='%23d6463a'/%3E%3Crect x='3' y='17' width='12' height='12' rx='2.5' fill='%233fae99'/%3E%3Crect x='17' y='17' width='12' height='12' rx='2.5' fill='%232b45c9'/%3E%3C/svg%3E">
+<title>Expectimax 2048</title>
+<style>body { margin: 0; } [hidden]:not([hidden="until-found" i]) { display: none !important; }</style>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: lab bench. Board on the left as the live specimen, instrument panel on the right; stacks on phones. */
+:root {
+  --bg: #e7ebe8;
+  --surface: #f5f7f5;
+  --ink: #16201c;
+  --muted: #5a6862;
+  --line: #cdd5d1;
+  --well: #c3ccc7;
+  --cell: #d9e0dc;
+  --accent: #2b45c9;
+  --accent-soft: #dfe4fa;
+  --good: #1f7a55;
+  --warn: #a0540e;
+  --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --gap: 10px;
+  --dur: 110ms;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111613; --surface: #192019; --ink: #e4eae6; --muted: #8b9a93; --line: #29332e;
+    --well: #222a26; --cell: #2c3631; --accent: #8fa2ff; --accent-soft: #232a4a;
+    --good: #5cc79a; --warn: #e3a35a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111613; --surface: #192019; --ink: #e4eae6; --muted: #8b9a93; --line: #29332e;
+  --well: #222a26; --cell: #2c3631; --accent: #8fa2ff; --accent-soft: #232a4a;
+  --good: #5cc79a; --warn: #e3a35a; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--display); font-size: 15px; line-height: 1.45;
+  padding-inline: 16px; padding-block: 20px 40px;
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 16px; }
+h1 { margin: 0; font-size: clamp(30px, 5vw, 46px); font-weight: 800; letter-spacing: -0.03em; line-height: 1; font-variation-settings: "opsz" 96; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.sub { margin: 6px 0 0; color: var(--muted); max-width: 52ch; }
+.scores { display: flex; gap: 8px; }
+.score { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; min-width: 92px; }
+.score b { display: block; font: 600 20px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+
+main { display: grid; grid-template-columns: minmax(0, 520px) minmax(0, 1fr); gap: 28px; align-items: start; }
+@media (max-width: 880px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+/* Board */
+.board-col { display: grid; gap: 14px; min-width: 0; }
+.board {
+  position: relative; width: 100%; max-width: 520px; aspect-ratio: 1; container-type: inline-size;
+  background: var(--well); border-radius: 12px; padding: var(--gap);
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); touch-action: none;
+}
+.cell { background: var(--cell); border-radius: 6px; }
+.tiles { position: absolute; inset: var(--gap); }
+.tile {
+  position: absolute; left: 0; top: 0;
+  width: calc((100% - 3 * var(--gap)) / 4); height: calc((100% - 3 * var(--gap)) / 4);
+  transform: translate(calc(var(--x) * (100% + var(--gap))), calc(var(--y) * (100% + var(--gap))));
+  transition: transform var(--dur) ease-out;
+  z-index: 2;
+}
+.tile.leaving { z-index: 1; }
+.tile i {
+  display: grid; place-items: center; width: 100%; height: 100%; border-radius: 6px;
+  font-style: normal; font-weight: 800; font-size: 11cqw; letter-spacing: -0.04em;
+  font-variation-settings: "opsz" 48; font-variant-numeric: tabular-nums;
+  background: var(--t-bg); color: var(--t-fg);
+}
+.tile[data-len="3"] i { font-size: 9cqw; }
+.tile[data-len="4"] i { font-size: 7cqw; }
+.tile[data-len="5"] i { font-size: 5.6cqw; }
+.tile.new i { animation: appear calc(var(--dur) * 1.6) ease-out backwards; animation-delay: var(--dur); }
+.tile.pop i { animation: pop calc(var(--dur) * 1.6) ease-out; }
+@keyframes appear { from { transform: scale(0.2); opacity: 0; } }
+@keyframes pop { 50% { transform: scale(1.12); } }
+/* Tile ramp: fixed fills so tiles read the same on either theme. */
+.e1  { --t-bg: #eeeee4; --t-fg: #36403b; }
+.e2  { --t-bg: #e3e1c8; --t-fg: #36403b; }
+.e3  { --t-bg: #f3be86; --t-fg: #fff; }
+.e4  { --t-bg: #ef9a5d; --t-fg: #fff; }
+.e5  { --t-bg: #e9704a; --t-fg: #fff; }
+.e6  { --t-bg: #d6463a; --t-fg: #fff; }
+.e7  { --t-bg: #7ccbb4; --t-fg: #fff; }
+.e8  { --t-bg: #3fae99; --t-fg: #fff; }
+.e9  { --t-bg: #1f8c80; --t-fg: #fff; }
+.e10 { --t-bg: #2e72c0; --t-fg: #fff; }
+.e11 { --t-bg: #2b45c9; --t-fg: #fff; }
+.e12 { --t-bg: #5b2fc0; --t-fg: #fff; }
+.e13 { --t-bg: #8c22a3; --t-fg: #fff; }
+.e14 { --t-bg: #b0186f; --t-fg: #fff; }
+.e15, .e16, .e17 { --t-bg: #191826; --t-fg: #f6d36b; }
+
+.over {
+  position: absolute; inset: 0; z-index: 5; border-radius: 12px;
+  display: grid; place-content: center; text-align: center; gap: 6px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(2px);
+}
+.over strong { font-size: 32px; font-weight: 800; letter-spacing: -0.02em; }
+.over span { color: var(--muted); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button {
+  font: 600 14px/1 var(--display); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); min-width: 92px; }
+button.small { padding: 6px 10px; font-size: 13px; }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px 20px; }
+.field { display: grid; gap: 4px; }
+.field-head { display: flex; justify-content: space-between; gap: 8px; }
+.field-head output { font: 13px var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+select { font: 14px var(--display); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+kbd { font: 12px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface); }
+.milestones { display: flex; flex-wrap: wrap; gap: 6px; min-height: 26px; }
+.chip { font: 12px var(--mono); padding: 3px 8px; border-radius: 99px; background: var(--surface); border: 1px solid var(--line); }
+.chip b { font-weight: 600; }
+
+/* Panel */
+.panel { display: grid; gap: 24px; min-width: 0; }
+section h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 700; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+
+.moves { display: grid; gap: 8px; }
+.mv { display: grid; grid-template-columns: 74px minmax(0, 1fr) 78px; align-items: center; gap: 10px; font-size: 14px; }
+.mv .name { font-weight: 600; display: flex; gap: 6px; align-items: center; }
+.mv .arrow { font: 600 16px var(--mono); width: 18px; text-align: center; }
+.bar { height: 10px; border-radius: 99px; background: var(--cell); overflow: hidden; }
+.bar > div { height: 100%; width: 0; background: var(--muted); border-radius: 99px; transition: width 160ms ease-out; }
+.mv .val { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.mv.best .name, .mv.best .val { color: var(--accent); }
+.mv.best .bar > div { background: var(--accent); }
+.mv.illegal { opacity: 0.45; }
+.searchline { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px 16px; font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.searchline b { color: var(--ink); font-weight: 600; }
+
+.weights { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 20px; }
+.weights .field small { color: var(--muted); font-size: 12px; line-height: 1.3; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.presets button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.stats div b { display: block; font: 600 18px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.reach { display: grid; gap: 6px; margin-bottom: 14px; }
+.reach-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 44px; gap: 10px; align-items: center; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.reach-row .bar > div { background: var(--good); }
+.reach-row span:last-child { text-align: right; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+th { text-align: left; font: 600 11px var(--display); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); }
+td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td.num, th.num { text-align: right; }
+.maxtile { display: inline-block; min-width: 46px; text-align: center; padding: 1px 6px; border-radius: 4px; background: var(--t-bg); color: var(--t-fg); font-weight: 600; }
+.empty { color: var(--muted); font-size: 14px; padding: 12px 0 4px; }
+.confirm { display: flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur: 0ms; }
+  .bar > div { transition: none; }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Expectimax <span>2048</span></h1>
+      <p class="sub">An expectimax search plays every move, averaging over each possible tile spawn and scoring positions with a weighted heuristic. Adjust the weights and see whether it scores higher.</p>
+    </div>
+    <div class="scores">
+      <div class="score"><span class="label">Score</span><b id="score">0</b></div>
+      <div class="score"><span class="label">Best</span><b id="best">0</b></div>
+      <div class="score"><span class="label">Moves</span><b id="moves">0</b></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="board-col">
+      <div class="board" id="board">
+        <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        <div class="tiles" id="tiles"></div>
+        <div class="over" id="over" hidden><strong id="over-title">Game over</strong><span id="over-sub"></span></div>
+      </div>
+
+      <div class="milestones" id="milestones" aria-label="Milestones this game"></div>
+
+      <div class="controls">
+        <button class="primary" id="play">Pause</button>
+        <button id="step">Step</button>
+        <button id="new">New game</button>
+        <label class="check"><input type="checkbox" id="auto" checked> Auto-restart</label>
+      </div>
+
+      <div class="settings">
+        <div class="field">
+          <div class="field-head"><label class="label" for="speed">Speed</label><output id="speed-out"></output></div>
+          <input type="range" id="speed" min="0" max="4" step="1" value="2">
+        </div>
+        <div class="field">
+          <div class="field-head"><label class="label" for="depth">Max search depth</label><output id="depth-out"></output></div>
+          <input type="range" id="depth" min="2" max="6" step="1" value="3">
+        </div>
+      </div>
+      <p class="hint">Press <kbd>Space</kbd> to play or pause. Arrow keys, <kbd>WASD</kbd> or swiping on the board pause the solver so you can play yourself. The panel keeps showing its recommended move.</p>
+    </div>
+
+    <div class="panel">
+      <section>
+        <h2>Next move <span id="status" class="label"></span></h2>
+        <div class="card">
+          <div class="moves" id="mv-list"></div>
+          <div class="searchline">
+            <span>depth <b id="s-depth">–</b></span>
+            <span>positions <b id="s-nodes">–</b></span>
+            <span>time <b id="s-ms">–</b></span>
+            <span>rate <b id="s-rate">–</b></span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Heuristic weights <button class="small" id="reset-w">Reset</button></h2>
+        <div class="card">
+          <div class="presets" id="presets"></div>
+          <div class="weights" id="weights"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Your runs <span id="clear-wrap"><button class="small" id="clear">Clear</button></span></h2>
+        <div class="card">
+          <div class="stats">
+            <div><span class="label">Games</span><b id="st-games">0</b></div>
+            <div><span class="label">Avg score</span><b id="st-avg">–</b></div>
+            <div><span class="label">Best tile</span><b id="st-tile">–</b></div>
+          </div>
+          <div class="reach" id="reach"></div>
+          <div class="table-wrap" id="history"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script type="text/plain" id="engine-src">
+// 2048 expectimax engine. Board = 4 rows, each a 16-bit key of four 4-bit exponents
+// (nibble i = column i, 0 = empty). Runs inside a Web Worker or under Node for tests.
+const ROW_LEFT = new Uint16Array(65536);
+const ROW_RIGHT = new Uint16Array(65536);
+const HEUR = new Float64Array(65536);
+
+let W = { lost: 200000, empty: 270, merges: 700, mono: 47, monoPow: 4, sum: 11, sumPow: 3.5 };
+
+function buildMoveTables() {
+  const line = [0, 0, 0, 0];
+  for (let r = 0; r < 65536; r++) {
+    line[0] = r & 15; line[1] = (r >> 4) & 15; line[2] = (r >> 8) & 15; line[3] = (r >> 12) & 15;
+    for (let i = 0; i < 3; i++) {
+      let j = i + 1;
+      while (j < 4 && line[j] === 0) j++;
+      if (j === 4) break;
+      if (line[i] === 0) { line[i] = line[j]; line[j] = 0; i--; }
+      else if (line[i] === line[j]) { if (line[i] !== 15) line[i]++; line[j] = 0; }
+    }
+    ROW_LEFT[r] = line[0] | (line[1] << 4) | (line[2] << 8) | (line[3] << 12);
+  }
+  for (let r = 0; r < 65536; r++) ROW_RIGHT[r] = reverseRow(ROW_LEFT[reverseRow(r)]);
+}
+
+function reverseRow(r) {
+  return ((r & 15) << 12) | (((r >> 4) & 15) << 8) | (((r >> 8) & 15) << 4) | ((r >> 12) & 15);
+}
+
+function buildHeuristic(weights) {
+  if (weights) W = Object.assign({}, W, weights);
+  const pm = new Float64Array(16), ps = new Float64Array(16);
+  for (let k = 0; k < 16; k++) { pm[k] = Math.pow(k, W.monoPow); ps[k] = Math.pow(k, W.sumPow); }
+  for (let r = 0; r < 65536; r++) {
+    const a = r & 15, b = (r >> 4) & 15, c = (r >> 8) & 15, d = (r >> 12) & 15;
+    const line = [a, b, c, d];
+    let sum = 0, empty = 0, merges = 0, prev = 0, counter = 0;
+    for (let i = 0; i < 4; i++) {
+      const rank = line[i];
+      sum += ps[rank];
+      if (rank === 0) empty++;
+      else {
+        if (prev === rank) counter++;
+        else if (counter > 0) { merges += 1 + counter; counter = 0; }
+        prev = rank;
+      }
+    }
+    if (counter > 0) merges += 1 + counter;
+    let monoL = 0, monoR = 0;
+    for (let i = 1; i < 4; i++) {
+      if (line[i - 1] > line[i]) monoL += pm[line[i - 1]] - pm[line[i]];
+      else monoR += pm[line[i]] - pm[line[i - 1]];
+    }
+    HEUR[r] = W.lost + W.empty * empty + W.merges * merges - W.mono * Math.min(monoL, monoR) - W.sum * sum;
+  }
+}
+
+// Transpose writes columns into T0..T3 (column key nibble i = row i).
+let T0 = 0, T1 = 0, T2 = 0, T3 = 0;
+function transpose(r0, r1, r2, r3) {
+  T0 = (r0 & 15) | ((r1 & 15) << 4) | ((r2 & 15) << 8) | ((r3 & 15) << 12);
+  T1 = ((r0 >> 4) & 15) | (((r1 >> 4) & 15) << 4) | (((r2 >> 4) & 15) << 8) | (((r3 >> 4) & 15) << 12);
+  T2 = ((r0 >> 8) & 15) | (((r1 >> 8) & 15) << 4) | (((r2 >> 8) & 15) << 8) | (((r3 >> 8) & 15) << 12);
+  T3 = ((r0 >> 12) & 15) | (((r1 >> 12) & 15) << 4) | (((r2 >> 12) & 15) << 8) | (((r3 >> 12) & 15) << 12);
+}
+
+// Directions: 0 up, 1 right, 2 down, 3 left. Result rows in M0..M3; returns true if the board changed.
+let M0 = 0, M1 = 0, M2 = 0, M3 = 0;
+function doMove(r0, r1, r2, r3, dir) {
+  if (dir === 3 || dir === 1) {
+    const t = dir === 3 ? ROW_LEFT : ROW_RIGHT;
+    M0 = t[r0]; M1 = t[r1]; M2 = t[r2]; M3 = t[r3];
+  } else {
+    transpose(r0, r1, r2, r3);
+    const t = dir === 0 ? ROW_LEFT : ROW_RIGHT;
+    const c0 = t[T0], c1 = t[T1], c2 = t[T2], c3 = t[T3];
+    transpose(c0, c1, c2, c3);
+    M0 = T0; M1 = T1; M2 = T2; M3 = T3;
+  }
+  return M0 !== r0 || M1 !== r1 || M2 !== r2 || M3 !== r3;
+}
+
+function heur(r0, r1, r2, r3) {
+  transpose(r0, r1, r2, r3);
+  return HEUR[r0] + HEUR[r1] + HEUR[r2] + HEUR[r3] + HEUR[T0] + HEUR[T1] + HEUR[T2] + HEUR[T3];
+}
+
+function countEmpty(r) {
+  return ((r & 15) === 0) + (((r >> 4) & 15) === 0) + (((r >> 8) & 15) === 0) + (((r >> 12) & 15) === 0);
+}
+
+function distinctTiles(r0, r1, r2, r3) {
+  let mask = 0;
+  for (const r of [r0, r1, r2, r3]) for (let i = 0; i < 16; i += 4) mask |= 1 << ((r >> i) & 15);
+  mask >>= 1;
+  let n = 0;
+  while (mask) { n += mask & 1; mask >>= 1; }
+  return n;
+}
+
+// Transposition table: open addressing keyed on two 32-bit halves, invalidated by generation.
+const TT_BITS = 20, TT_SIZE = 1 << TT_BITS, TT_MASK = TT_SIZE - 1;
+const ttA = new Int32Array(TT_SIZE), ttB = new Int32Array(TT_SIZE);
+const ttGen = new Uint32Array(TT_SIZE), ttDepth = new Uint8Array(TT_SIZE), ttVal = new Float64Array(TT_SIZE);
+let gen = 0;
+
+const CPROB_MIN = 0.0001;
+let depthLimit = 3, curDepth = 0, nodes = 0, maxReached = 0;
+
+function chanceNode(r0, r1, r2, r3, cprob) {
+  if (cprob < CPROB_MIN || curDepth >= depthLimit) {
+    if (curDepth > maxReached) maxReached = curDepth;
+    return heur(r0, r1, r2, r3);
+  }
+  const A = (r0 << 16) | r1, B = (r2 << 16) | r3;
+  let h = (Math.imul(A, 0x9e3779b1) ^ Math.imul(B ^ (A >>> 15), 0x85ebca77)) >>> (32 - TT_BITS);
+  for (let probe = 0; probe < 4; probe++) {
+    const s = (h + probe) & TT_MASK;
+    if (ttGen[s] === gen && ttA[s] === A && ttB[s] === B) {
+      if (ttDepth[s] <= curDepth) return ttVal[s];
+      break;
+    }
+  }
+  const empty = countEmpty(r0) + countEmpty(r1) + countEmpty(r2) + countEmpty(r3);
+  cprob /= empty;
+  let res = 0;
+  const rows = [r0, r1, r2, r3];
+  for (let i = 0; i < 4; i++) {
+    const row = rows[i];
+    for (let s = 0; s < 16; s += 4) {
+      if (((row >> s) & 15) !== 0) continue;
+      rows[i] = row | (1 << s);
+      res += maxNode(rows[0], rows[1], rows[2], rows[3], cprob * 0.9) * 0.9;
+      rows[i] = row | (2 << s);
+      res += maxNode(rows[0], rows[1], rows[2], rows[3], cprob * 0.1) * 0.1;
+      rows[i] = row;
+    }
+  }
+  res /= empty;
+  // Store, replacing the first stale or matching slot (or the home slot).
+  let slot = h & TT_MASK;
+  for (let probe = 0; probe < 4; probe++) {
+    const s = (h + probe) & TT_MASK;
+    if (ttGen[s] !== gen || (ttA[s] === A && ttB[s] === B)) { slot = s; break; }
+  }
+  ttGen[slot] = gen; ttA[slot] = A; ttB[slot] = B; ttDepth[slot] = curDepth; ttVal[slot] = res;
+  return res;
+}
+
+function maxNode(r0, r1, r2, r3, cprob) {
+  nodes++;
+  let best = 0;
+  curDepth++;
+  for (let dir = 0; dir < 4; dir++) {
+    if (doMove(r0, r1, r2, r3, dir)) {
+      const v = chanceNode(M0, M1, M2, M3, cprob);
+      if (v > best) best = v;
+    }
+  }
+  curDepth--;
+  return best;
+}
+
+// grid: 16 exponents, row-major. Returns per-direction expected values (null = illegal).
+function analyze(grid, maxDepth) {
+  const rows = [0, 0, 0, 0];
+  for (let i = 0; i < 16; i++) rows[i >> 2] |= Math.min(grid[i], 15) << ((i & 3) * 4);
+  const [r0, r1, r2, r3] = rows;
+  const t0 = Date.now();
+  gen = (gen + 1) >>> 0 || 1;
+  nodes = 0; maxReached = 0;
+  depthLimit = Math.max(2, Math.min(maxDepth, distinctTiles(r0, r1, r2, r3) - 2));
+  const scores = [null, null, null, null];
+  let best = -1, bestVal = -Infinity;
+  for (let dir = 0; dir < 4; dir++) {
+    if (!doMove(r0, r1, r2, r3, dir)) continue;
+    curDepth = 0;
+    const v = chanceNode(M0, M1, M2, M3, 1);
+    scores[dir] = v;
+    if (v > bestVal) { bestVal = v; best = dir; }
+  }
+  return { best, scores, nodes, depth: depthLimit, ms: Date.now() - t0 };
+}
+
+buildMoveTables();
+buildHeuristic();
+
+if (typeof module !== 'undefined') module.exports = { analyze, buildHeuristic };
+else {
+  self.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'weights') buildHeuristic(m.weights);
+    else if (m.type === 'analyze') self.postMessage(Object.assign({ id: m.id }, analyze(m.grid, m.maxDepth)));
+  };
+}
+
+</script>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('x2048:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('x2048:' + k, JSON.stringify(v)); } catch {} },
+  };
+
+  // ---------- Settings ----------
+  const SPEEDS = [
+    { label: 'Slow', delay: 500 }, { label: 'Normal', delay: 180 }, { label: 'Fast', delay: 60 },
+    { label: 'Very fast', delay: 15 }, { label: 'Max', delay: 0 },
+  ];
+  const WEIGHT_DEFS = [
+    { key: 'empty', label: 'Empty cells', min: 0, max: 1000, step: 10, note: 'Reward for each empty cell in a row or column.' },
+    { key: 'merges', label: 'Merges', min: 0, max: 2000, step: 10, note: 'Reward for neighboring equal tiles that can merge.' },
+    { key: 'mono', label: 'Monotonicity', min: 0, max: 200, step: 1, note: 'Penalty when a line is not sorted in either direction.' },
+    { key: 'monoPow', label: 'Monotonicity power', min: 1, max: 6, step: 0.1, note: 'Raising this makes misplacing big tiles cost more.' },
+    { key: 'sum', label: 'Tile sum', min: 0, max: 50, step: 0.5, note: 'Penalty on large tiles, which pushes the search to merge sooner.' },
+    { key: 'sumPow', label: 'Tile sum power', min: 1, max: 5, step: 0.1, note: 'How much harder large tiles are penalized than small ones.' },
+  ];
+  const BASE = { lost: 200000, empty: 270, merges: 700, mono: 47, monoPow: 4, sum: 11, sumPow: 3.5 };
+  const PRESETS = [
+    { name: 'Balanced', w: BASE },
+    { name: 'Corner hugger', w: { ...BASE, mono: 120, monoPow: 4.5, merges: 400 } },
+    { name: 'Space saver', w: { ...BASE, empty: 700, sum: 6 } },
+    { name: 'Greedy merger', w: { ...BASE, merges: 1600, mono: 20 } },
+  ];
+
+  let weights = { ...BASE, ...store.get('weights', {}) };
+  let speedIdx = store.get('speed', 2);
+  let maxDepth = store.get('depth', 3);
+  let history = store.get('history', []);
+  let bestScore = store.get('best', 0);
+  $('auto').checked = store.get('auto', true);
+
+  // ---------- Worker ----------
+  const workerUrl = URL.createObjectURL(new Blob([$('engine-src').textContent], { type: 'text/javascript' }));
+  const worker = new Worker(workerUrl);
+  let reqId = 0;
+  const pending = new Map();
+  worker.onmessage = (e) => {
+    const res = e.data, cb = pending.get(res.id);
+    pending.delete(res.id);
+    if (cb) cb(res.id === reqId ? res : null);
+  };
+  function sendWeights() { worker.postMessage({ type: 'weights', weights }); }
+  function analyze() {
+    const id = ++reqId;
+    return new Promise((resolve) => {
+      pending.set(id, resolve);
+      worker.postMessage({ type: 'analyze', id, grid: grid.map((t) => (t ? t.v : 0)), maxDepth });
+    });
+  }
+  sendWeights();
+
+  // ---------- Game ----------
+  const tilesEl = $('tiles');
+  let grid, score, moves, over, milestones, nextId = 1;
+  const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]]; // up right down left
+
+  function animMs() { return matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : Math.min(110, SPEEDS[speedIdx].delay * 0.7); }
+
+  function makeTile(pos, v) {
+    const el = document.createElement('div');
+    el.innerHTML = '<i></i>';
+    const t = { id: nextId++, v, pos, el, isNew: true, merged: false };
+    tilesEl.appendChild(el);
+    return t;
+  }
+
+  function spawn() {
+    const empty = [];
+    for (let i = 0; i < 16; i++) if (!grid[i]) empty.push(i);
+    if (!empty.length) return;
+    const pos = empty[(Math.random() * empty.length) | 0];
+    grid[pos] = makeTile(pos, Math.random() < 0.9 ? 1 : 2);
+  }
+
+  function newGame() {
+    tilesEl.innerHTML = '';
+    grid = new Array(16).fill(null);
+    score = 0; moves = 0; over = false; milestones = [];
+    reqId++; // drop any analysis of the previous board
+    spawn(); spawn();
+    $('over').hidden = true;
+    render();
+    renderMilestones();
+  }
+
+  function move(dir) {
+    const [dx, dy] = DIRS[dir];
+    const xs = dx === 1 ? [3, 2, 1, 0] : [0, 1, 2, 3];
+    const ys = dy === 1 ? [3, 2, 1, 0] : [0, 1, 2, 3];
+    const leaving = [];
+    let moved = false, gained = 0;
+    for (const t of grid) if (t) { t.isNew = false; t.merged = false; }
+    for (const y of ys) for (const x of xs) {
+      const t = grid[y * 4 + x];
+      if (!t) continue;
+      let cx = x, cy = y, mergedInto = null;
+      for (;;) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx > 3 || ny < 0 || ny > 3) break;
+        const n = grid[ny * 4 + nx];
+        if (!n) { cx = nx; cy = ny; continue; }
+        if (n.v === t.v && !n.merged) mergedInto = n;
+        break;
+      }
+      if (mergedInto) {
+        grid[y * 4 + x] = null;
+        mergedInto.v++; mergedInto.merged = true;
+        gained += 2 ** mergedInto.v;
+        t.pos = mergedInto.pos;
+        leaving.push(t);
+        moved = true;
+      } else if (cx !== x || cy !== y) {
+        grid[y * 4 + x] = null;
+        t.pos = cy * 4 + cx;
+        grid[t.pos] = t;
+        moved = true;
+      }
+    }
+    if (!moved) return false;
+    score += gained; moves++;
+    const top = Math.max(...grid.map((t) => (t ? t.v : 0)));
+    if (top >= 9 && !milestones.some((m) => m.v === top)) { milestones.push({ v: top, move: moves }); renderMilestones(); }
+    spawn();
+    render(leaving);
+    return true;
+  }
+
+  function canMove() {
+    for (let i = 0; i < 16; i++) {
+      if (!grid[i]) return true;
+      const v = grid[i].v;
+      if ((i & 3) < 3 && grid[i + 1] && grid[i + 1].v === v) return true;
+      if (i < 12 && grid[i + 4] && grid[i + 4].v === v) return true;
+    }
+    return false;
+  }
+
+  function paintTile(t) {
+    const el = t.el, label = String(2 ** t.v);
+    el.className = 'tile e' + t.v + (t.isNew ? ' new' : '');
+    el.dataset.len = label.length;
+    el.style.setProperty('--x', t.pos & 3);
+    el.style.setProperty('--y', t.pos >> 2);
+    el.firstChild.textContent = label;
+  }
+
+  function render(leaving = []) {
+    const ms = animMs();
+    document.documentElement.style.setProperty('--dur', ms + 'ms');
+    for (const t of leaving) {
+      t.el.classList.add('leaving');
+      t.el.style.setProperty('--x', t.pos & 3);
+      t.el.style.setProperty('--y', t.pos >> 2);
+      if (ms) setTimeout(() => t.el.remove(), ms); else t.el.remove();
+    }
+    for (const t of grid) {
+      if (!t) continue;
+      paintTile(t);
+      if (t.merged) {
+        if (ms) {
+          // Show the doubled value once the incoming tile lands.
+          t.el.firstChild.textContent = String(2 ** (t.v - 1));
+          t.el.className = 'tile e' + (t.v - 1);
+          setTimeout(() => { paintTile(t); t.el.classList.add('pop'); }, ms);
+        }
+      }
+    }
+    $('score').textContent = score.toLocaleString();
+    $('moves').textContent = moves.toLocaleString();
+    if (score > bestScore) { bestScore = score; store.set('best', bestScore); }
+    $('best').textContent = bestScore.toLocaleString();
+  }
+
+  function renderMilestones() {
+    $('milestones').innerHTML = milestones.length
+      ? milestones.map((m) => `<span class="chip">reached <b>${2 ** m.v}</b> on move ${m.move.toLocaleString()}</span>`).join('')
+      : '<span class="hint">Tiles of 512 and up are logged here with the move they appeared on.</span>';
+  }
+
+  // ---------- Analysis display ----------
+  const MV_NAMES = [['↑', 'Up'], ['→', 'Right'], ['↓', 'Down'], ['←', 'Left']];
+  $('mv-list').innerHTML = MV_NAMES.map(([a, n], i) =>
+    `<div class="mv" id="mv${i}"><span class="name"><span class="arrow">${a}</span>${n}</span><div class="bar"><div></div></div><span class="val">–</span></div>`).join('');
+
+  function fmtInt(n) { return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); }
+
+  function showAnalysis(res) {
+    const legal = res.scores.filter((v) => v != null);
+    const hi = Math.max(...legal), lo = Math.min(...legal);
+    res.scores.forEach((v, i) => {
+      const row = $('mv' + i), bar = row.querySelector('.bar > div'), val = row.querySelector('.val');
+      row.classList.toggle('best', i === res.best);
+      row.classList.toggle('illegal', v == null);
+      if (v == null) { bar.style.width = '0'; val.textContent = 'blocked'; return; }
+      const frac = hi === lo ? 1 : (v - lo) / (hi - lo);
+      bar.style.width = (12 + 88 * frac).toFixed(1) + '%';
+      val.textContent = i === res.best ? 'best' : ((v / hi - 1) * 100).toFixed(2) + '%';
+      val.title = 'Expected heuristic value ' + Math.round(v).toLocaleString();
+    });
+    $('s-depth').textContent = res.depth;
+    $('s-nodes').textContent = fmtInt(res.nodes);
+    $('s-ms').textContent = res.ms + ' ms';
+    $('s-rate').textContent = res.ms ? fmtInt(Math.round(res.nodes / res.ms * 1000)) + '/s' : '–';
+  }
+
+  // ---------- Loop ----------
+  let running = true, timer = null, busy = false;
+
+  function setRunning(on) {
+    running = on;
+    $('play').textContent = on ? 'Pause' : 'Play';
+    $('status').textContent = on ? 'solver playing' : 'paused';
+    clearTimeout(timer);
+    if (on) {
+      if (over) { newGame(); }
+      tick();
+    }
+  }
+
+  async function tick() {
+    if (busy) return;
+    busy = true;
+    const res = await analyze();
+    busy = false;
+    if (!res) { if (running && !over) timer = setTimeout(tick, 0); return; }
+    showAnalysis(res);
+    if (!running) return;
+    if (res.best < 0) { endGame(); return; }
+    move(res.best);
+    timer = setTimeout(tick, SPEEDS[speedIdx].delay);
+  }
+
+  async function refreshHint() {
+    if (over) return;
+    const res = await analyze();
+    if (res) showAnalysis(res);
+  }
+
+  function endGame() {
+    over = true;
+    const top = Math.max(...grid.map((t) => (t ? t.v : 0)));
+    history.unshift({ score, top, moves, preset: presetName(), depth: maxDepth, at: Date.now() });
+    history = history.slice(0, 200);
+    store.set('history', history);
+    renderHistory();
+    $('over-title').textContent = 'Game over';
+    $('over-sub').textContent = `${score.toLocaleString()} points · top tile ${2 ** top} · ${moves.toLocaleString()} moves`;
+    $('over').hidden = false;
+    if (running && $('auto').checked) {
+      timer = setTimeout(() => { newGame(); tick(); }, speedIdx >= 3 ? 600 : 1800);
+    } else if (running) {
+      setRunning(false);
+    }
+  }
+
+  // ---------- Manual play ----------
+  function manual(dir) {
+    if (running) setRunning(false);
+    if (over) return;
+    if (move(dir)) {
+      if (!canMove()) endGame(); else refreshHint();
+    }
+  }
+  const KEYS = { ArrowUp: 0, ArrowRight: 1, ArrowDown: 2, ArrowLeft: 3, w: 0, d: 1, s: 2, a: 3, W: 0, D: 1, S: 2, A: 3 };
+  document.addEventListener('keydown', (e) => {
+    if (e.target.closest('input, select, textarea')) return;
+    if (e.key === ' ') { e.preventDefault(); setRunning(!running); return; }
+    if (e.key in KEYS && !e.metaKey && !e.ctrlKey) { e.preventDefault(); manual(KEYS[e.key]); }
+  });
+  let touch = null;
+  $('board').addEventListener('touchstart', (e) => { const p = e.touches[0]; touch = [p.clientX, p.clientY]; }, { passive: true });
+  $('board').addEventListener('touchend', (e) => {
+    if (!touch) return;
+    const p = e.changedTouches[0], dx = p.clientX - touch[0], dy = p.clientY - touch[1];
+    touch = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+    manual(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 1 : 3) : (dy > 0 ? 2 : 0));
+  });
+
+  // ---------- Controls ----------
+  $('play').onclick = () => setRunning(!running);
+  $('step').onclick = async () => {
+    if (running) setRunning(false);
+    if (over || busy) return;
+    busy = true;
+    const res = await analyze();
+    busy = false;
+    if (!res) return;
+    if (res.best < 0) { endGame(); return; }
+    move(res.best);
+    if (!canMove()) endGame(); else refreshHint();
+  };
+  $('new').onclick = () => { clearTimeout(timer); newGame(); if (running) tick(); else refreshHint(); };
+  $('auto').onchange = () => store.set('auto', $('auto').checked);
+
+  function syncSettings() {
+    $('speed').value = speedIdx;
+    $('speed-out').textContent = SPEEDS[speedIdx].label + (SPEEDS[speedIdx].delay ? ` · ${SPEEDS[speedIdx].delay} ms` : '');
+    $('depth').value = maxDepth;
+    $('depth-out').textContent = maxDepth + (maxDepth <= 3 ? ' · quick' : maxDepth === 4 ? ' · strong' : ' · slow, strongest');
+  }
+  $('speed').oninput = () => { speedIdx = +$('speed').value; store.set('speed', speedIdx); syncSettings(); };
+  $('depth').oninput = () => { maxDepth = +$('depth').value; store.set('depth', maxDepth); syncSettings(); };
+
+  // ---------- Weights ----------
+  function presetName() {
+    const p = PRESETS.find((p) => WEIGHT_DEFS.every((d) => p.w[d.key] === weights[d.key]));
+    return p ? p.name : 'Custom';
+  }
+  $('weights').innerHTML = WEIGHT_DEFS.map((d) => `
+    <div class="field">
+      <div class="field-head"><label class="label" for="w-${d.key}">${d.label}</label><output id="w-${d.key}-out"></output></div>
+      <input type="range" id="w-${d.key}" min="${d.min}" max="${d.max}" step="${d.step}">
+      <small>${d.note}</small>
+    </div>`).join('');
+  $('presets').innerHTML = PRESETS.map((p, i) => `<button class="small" data-p="${i}">${p.name}</button>`).join('');
+
+  function syncWeights() {
+    for (const d of WEIGHT_DEFS) {
+      $('w-' + d.key).value = weights[d.key];
+      $('w-' + d.key + '-out').textContent = weights[d.key];
+    }
+    const name = presetName();
+    for (const b of $('presets').children) b.setAttribute('aria-pressed', String(PRESETS[+b.dataset.p].name === name));
+  }
+  let wTimer = null;
+  function applyWeights() {
+    store.set('weights', weights);
+    syncWeights();
+    clearTimeout(wTimer);
+    wTimer = setTimeout(() => { sendWeights(); if (!running) refreshHint(); }, 120);
+  }
+  for (const d of WEIGHT_DEFS) {
+    $('w-' + d.key).oninput = (e) => { weights[d.key] = +e.target.value; applyWeights(); };
+  }
+  $('presets').onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    weights = { ...PRESETS[+b.dataset.p].w };
+    applyWeights();
+  };
+  $('reset-w').onclick = () => { weights = { ...BASE }; applyWeights(); };
+
+  // ---------- History ----------
+  const REACH = [11, 12, 13, 14];
+  function renderHistory() {
+    const n = history.length;
+    $('st-games').textContent = n;
+    $('st-avg').textContent = n ? Math.round(history.reduce((s, h) => s + h.score, 0) / n).toLocaleString() : '–';
+    $('st-tile').textContent = n ? 2 ** Math.max(...history.map((h) => h.top)) : '–';
+    $('reach').innerHTML = REACH.map((e) => {
+      const pct = n ? (history.filter((h) => h.top >= e).length / n) * 100 : 0;
+      return `<div class="reach-row"><span>${2 ** e}</span><div class="bar"><div style="width:${pct}%"></div></div><span>${n ? Math.round(pct) + '%' : '–'}</span></div>`;
+    }).join('');
+    $('history').innerHTML = n
+      ? `<table><thead><tr><th>#</th><th class="num">Score</th><th>Top tile</th><th class="num">Moves</th><th>Weights</th><th class="num">Depth</th></tr></thead><tbody>${
+          history.slice(0, 15).map((h, i) => `<tr><td>${n - i}</td><td class="num">${h.score.toLocaleString()}</td><td><span class="maxtile e${h.top}">${2 ** h.top}</span></td><td class="num">${h.moves.toLocaleString()}</td><td>${h.preset}</td><td class="num">${h.depth}</td></tr>`).join('')
+        }</tbody></table>`
+      : '<p class="empty">Finished games are listed here with their score, top tile and the weights used. Leave auto-restart on to collect a batch.</p>';
+  }
+  function bindClear() {
+    $('clear').onclick = () => {
+      $('clear-wrap').innerHTML = '<span class="confirm">Delete all runs? <button class="small" id="clear-yes">Delete</button><button class="small" id="clear-no">Keep</button></span>';
+      $('clear-yes').onclick = () => { history = []; bestScore = score; store.set('history', history); store.set('best', bestScore); renderHistory(); render(); restoreClear(); };
+      $('clear-no').onclick = restoreClear;
+    };
+  }
+  function restoreClear() { $('clear-wrap').innerHTML = '<button class="small" id="clear">Clear</button>'; bindClear(); }
+  bindClear();
+
+  // ---------- Boot ----------
+  function start(saved) {
+    syncSettings(); syncWeights(); renderHistory();
+    if (saved && saved.grid) {
+      tilesEl.innerHTML = '';
+      grid = saved.grid.map((v, i) => (v ? Object.assign(makeTile(i, v), { isNew: false }) : null));
+      score = saved.score; moves = saved.moves; milestones = saved.milestones || []; over = false;
+      render(); renderMilestones();
+    } else newGame();
+    setRunning(true);
+  }
+  window.claude?.hot?.snapshot?.(() => ({ grid: grid.map((t) => (t ? t.v : 0)), score, moves, milestones }));
+  window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
+})();
+</script>
+</body>
+</html>
